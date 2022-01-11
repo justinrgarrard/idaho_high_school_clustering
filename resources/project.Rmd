@@ -1,0 +1,639 @@
+---
+title: "project"
+output: html_document
+---
+
+### Introduction
+
+This document outlines an exploratory data analysis of publicly available
+assessment data for Idaho high schoolers. 
+
+### Data
+
+
+The dataset consists of 1,787 records, each representing a school in Idaho.
+Within each record is 26 variables describing the following:
+
+***[Identification]*** 
+
+Variables that describe the school and the time of the survey (ncessch_num,
+year, school_name, leaid_num, lea_name, fips, ncessch, leaid).
+
+***[Demographics]***
+
+Variables that describe the student population in question (grade_edfacts,
+race, sex, lep, homeless, migrant, disability, foster_care, military_connected,
+econ_disadvantaged).
+
+***[Academics]***
+
+Variables that describe the student population's academic performance
+(read_test_num_valid, read_test_pct_prof_low, read_test_pct_prof_midpt,
+read_test_pct_prof_high, math_test_num_valid, math_test_pct_prof_low,
+math_test_pct_prof_midpt, math_test_pct_prof_high).
+
+
+### EDA
+
+***Math and Reading***
+
+<Scatterplot of Math vs. Reading>
+
+In the year 2017 there were 210 high schools that reported assessment results.
+
+
+<Boxplot of Testing Scores>
+
+Notably, reading scores trend higher than math scores. 
+
+
+<Boxplot of Testing Scores (Gender)>
+
+<Linear Regression (Gender)>
+
+Additionally, reading scores differ fairly significantly by sex. A linear
+regression shows that female students score roughly 12 points higher than their
+male counterparts (with regards to midpoints).
+
+
+<Boxplot of Testing Scores (Race)>
+
+<Linear Regression (Race)>
+
+Race represents a more complex set of relationships. 
+
+
+
+
+### Methods and Objectives
+
+***[Performance]*** 
+
+*What factors are associated with high performance on the assessment? What
+factors are associated with low performance?*
+
+
+
+
+***[Prediction]*** 
+
+*Can future assessment results be predicted with any level of reliability using
+techniques covered in this course?* 
+
+(Suggested methods: smoothing, random forest, boosting algorithms.)
+
+
+
+
+***[Intervention]*** 
+
+*Can we identify low performing schools and suggest a reasonable treatment
+which might improve their assessment results?*
+
+(Suggested methods: boxplots, clustering, review of domain-specific
+literature.)
+
+
+
+
+### Appendix A: Code
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(reshape2)
+library(caret)
+library(educationdata)
+library(naniar)
+library(rpart)
+library(rpart.plot)
+library(scales)
+```
+
+```{r helper_functions}
+latest_year = 2017
+
+
+fetch_idaho_school_data <- function(source, subtopic_name) {
+  ## https://educationdata.urban.org/documentation/schools.html#edfacts-state-assessments-by-grade
+  ##
+  ## Note: "grade_edfacts = 9" translates to grades 9-12
+  ## 
+  ## Note: "fips = 16" translates to Idaho-only results
+  ##
+  ## Note: Idaho's state assessment switched providers in 2014, results should
+  ##       reflect this change
+  ##
+  ## Edfacts
+  if (source == 'edfacts') {
+    if (length(subtopic_name) == 0) {
+      data <- get_education_data(
+        level = "schools",
+        source = 'edfacts',
+        topic = 'assessments',
+        filters = list(grade_edfacts = 9, fips = 16, year = latest_year))
+    }
+    else {
+      data <- get_education_data(
+        level = "schools",
+        source = 'edfacts',
+        topic = 'assessments',
+        filters = list(grade_edfacts = 9, fips = 16, year = latest_year),
+        subtopic = subtopic_name)
+    }
+  }
+  
+  ## CCD
+  else if (source == 'ccd') {
+    data9 <- get_education_data(
+      level = "schools",
+      source = "ccd",
+      topic = "enrollment",
+      filters = list(year = latest_year, grade = 9)) %>% filter(fips==16)
+    
+    data10 <- get_education_data(
+      level = "schools",
+      source = "ccd",
+      topic = "enrollment",
+      filters = list(year = latest_year, grade = 10)) %>% filter(fips==16)
+    
+    data11 <- get_education_data(
+      level = "schools",
+      source = "ccd",
+      topic = "enrollment",
+      filters = list(year = latest_year, grade = 11)) %>% filter(fips==16)
+    
+    data12 <- get_education_data(
+      level = "schools",
+      source = "ccd",
+      topic = "enrollment",
+      filters = list(year = latest_year, grade = 12)) %>% filter(fips==16)
+    
+    data <- rbind(data9, data10, data11, data12)
+  }
+  
+  ## Bad Input
+  else {
+    print('ERROR: Unrecognized Source!!!')
+    data <- -1
+  }
+  
+  return(data)
+}
+
+
+encode_category <- function(data, categories, vals, target_column_name) {
+  # Encode math and reading scores for each category
+  generated_columns <- c()
+  for (i in 1:length(vals)) {
+    val <- vals[i]
+    ### Math Test
+    math_col_name <- paste0(categories[i], '_math')
+    data <- data %>%
+      mutate(!!sym(math_col_name) := ifelse(data[[target_column_name]]==val, data$math_test_pct_prof_midpt, 0))
+    ### Reading Test
+    read_col_name <- paste0(categories[i], '_read')
+    data <- data %>%
+      mutate(!!sym(read_col_name) := ifelse(data[[target_column_name]]==val, data$read_test_pct_prof_midpt, 0))
+    ### Record new category names
+    generated_columns <- append(generated_columns, math_col_name)
+    generated_columns <- append(generated_columns, read_col_name)
+  }
+  
+  # Aggregate into one record per school
+  data <- data %>%
+    group_by(ncessch_num) %>%
+    select(generated_columns) %>%
+    summarize_each(funs(sum))
+  
+  return(data)
+}
+```
+
+
+```{r load_data}
+# Load data
+
+###############################################################################
+
+# Pull general data
+data <- fetch_idaho_school_data('edfacts', list())
+
+###############################################################################
+
+# Pull and merge race data
+### Fetch the data
+data_race <- fetch_idaho_school_data('edfacts', list('race'))
+### Do something similar to a one-hot encoding
+race_categories <- c('white', 'black', 'hispanic', 'asian', 'indian',
+                     'hawaiian', 'two_plus', 'alien', 'unknown', 'other',
+                     'total')
+race_vals <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 20, 99)
+data_race_coded <- encode_category(data_race, race_categories, race_vals, 'race')
+### Merge
+data <- left_join(data, data_race_coded, by='ncessch_num')
+
+###############################################################################
+
+# Pull and merge sex data
+### Fetch the data
+data_sex <- fetch_idaho_school_data('edfacts', list('sex'))
+### Do something similar to a one-hot encoding
+sex_categories <- c('male', 'female', 'any')
+sex_vals <- c(1, 2, 99)
+data_sex_coded <- encode_category(data_sex, sex_categories, sex_vals, 'sex')
+### Merge
+data <- left_join(data, data_sex_coded, by='ncessch_num')
+
+###############################################################################
+
+# Pull and merge enrollment data
+### Fetch the data
+data_enrollment <- fetch_idaho_school_data('ccd', list())
+### Filter
+data_enrollment_staged <- data_enrollment %>%
+  select(ncessch_num, enrollment) %>%
+  group_by(ncessch_num) %>%
+  summarize(enrollment=sum(enrollment))
+### Merge
+data <- left_join(data, data_enrollment_staged, by='ncessch_num')
+
+###############################################################################
+
+# Pull and merge teacher employment data
+## Fetch the data
+data_teachers <- get_education_data(level = "schools",
+    source = "crdc",
+    topic = "teachers-staff",
+    filters = list(year = 2017))
+### Filter
+data_teachers_staged <- data_teachers %>%
+  filter(fips==16) %>%
+  mutate(ncessch_num=as.numeric(ncessch)) %>%
+  select(ncessch_num, teachers_fte_crdc)
+### Merge
+data <- left_join(data, data_teachers_staged, by='ncessch_num')
+### Generate new feature
+data$students_per_teacher <- as.numeric(data$enrollment) / as.numeric(data$teachers_fte_crdc)
+```
+
+```{r clean_data}
+# Convert negative values into NA's
+##
+## Note: Negative values mean that the data is either missing or suppressed
+##       to prevent identifying individual students in small populations
+##
+
+formatted_data <- data %>% replace_with_na_all(condition = ~.x <= 0) 
+formatted_data_race <- data_race %>% replace_with_na_all(condition = ~.x <= 0) 
+formatted_data_sex <- data_sex %>% replace_with_na_all(condition = ~.x <= 0) 
+
+na_count_start <- table(is.na(data))
+na_count_end <- table(is.na(formatted_data))
+
+print('NA Values Before Cleaning:')
+print(na_count_start)
+
+print('NA Values After Cleaning:')
+print(na_count_end)
+
+```
+
+```{r visualize_data}
+### Prepare data
+melted_formatted_data <- melt(select(formatted_data,
+                                     c(read_test_pct_prof_midpt,
+                                       math_test_pct_prof_midpt)))
+
+melted_formatted_data_sex=melt(select(formatted_data,
+                                      c(male_read,
+                                       female_read,
+                                       male_math,
+                                       female_math)))
+melted_formatted_data_sex$sex <- ifelse(melted_formatted_data_sex$variable=='female_math' |
+                                        melted_formatted_data_sex$variable=='female_read', 2, 1)
+melted_formatted_data_sex$sex <- as.factor(melted_formatted_data_sex$sex)
+
+melted_formatted_data_race=melt(select(formatted_data,
+                                       c(white_read,
+                                         hispanic_read,
+                                         white_math,
+                                         hispanic_math,)))
+melted_formatted_data_race$race <- ifelse(melted_formatted_data_race$variable=='white_math' |
+                                        melted_formatted_data_race$variable=='white_read', 1, 3)
+melted_formatted_data_race$race <- as.factor(melted_formatted_data_race$race)
+
+### Boxplot of Total Data
+ggplot(data=melted_formatted_data, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  ggtitle("Box Plot of Test Score Ranges") + 
+  labs(subtitle='Idaho High Schools 2017', x='Test Score Range', y='Score')
+ggsave(filename="boxplot_all.png",
+         width=6,
+         height=4)
+
+### Violinplot of Total Data
+ggplot(data=melted_formatted_data, aes(x=variable, y=value)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  ggtitle("Violin Plot of Variables")
+ggsave(filename="violinplot_all.png",
+         width=6,
+         height=4)
+
+### Boxplot of Data by Sex
+ggplot(aes(x=variable, y=value, fill=sex),
+   data=melted_formatted_data_sex) +
+   geom_boxplot() +
+   scale_fill_manual(labels = c("Male", "Female"),
+                     values = c("steelblue4", "darkorange2")) +
+   ggtitle("Box Plot of Test Score Ranges (by Sex)") +
+   labs(y='Score', x='Test Score Range', subtitle='Idaho High Schools 2017')
+ggsave(filename="boxplot_sex.png",
+         width=6,
+         height=4)
+
+### Boxplot of Data by Race
+ggplot(aes(x=variable, y=value, fill=race),
+   data=melted_formatted_data_race) +
+   geom_boxplot() +
+   scale_fill_manual(labels = c("White", "Hispanic"),
+                     values = c("mediumslateblue", "orangered3")) +
+   ggtitle("Box Plot of Test Score Ranges (by Race)") +
+   labs(y='Score', x='Test Score Range', subtitle='Idaho High Schools 2017')
+ggsave(filename="boxplot_race.png",
+         width=6,
+         height=4)
+dev.off()
+```
+
+
+```{r visualize_data_scatters}
+### Scatterplot of Math Midpt vs. Reading Midpt
+ggplot(data=formatted_data, aes(x=math_test_pct_prof_midpt,
+                                y=read_test_pct_prof_midpt)) +
+  geom_point() +
+  labs(x='% of Students Proficient in Math',
+       y='% of Students Proficient in Reading',
+       title='Math vs. Reading Proficiency',
+       subtitle='Idaho High Schools 2017')
+ggsave(filename="scatter_all.png",
+         width=6,
+         height=4)
+
+### Scatterplot of Math Midpt vs. Reading Midpt by Enrollment
+ggplot(data=formatted_data, aes(x=math_test_pct_prof_midpt,
+                                y=read_test_pct_prof_midpt,
+                                size=enrollment)) +
+  geom_point(alpha = 1/3) +
+  labs(x='% of Students Proficient in Math',
+       y='% of Students Proficient in Reading',
+       title='Math vs. Reading Proficiency (by Enrollment)',
+       subtitle='Idaho High Schools 2017')
+ggsave(filename="scatter_enroll.png",
+         width=6,
+         height=4)
+
+### Scatterplot of Math Midpt vs. Reading Midpt by FTE Teachers
+ggplot(data=formatted_data, aes(x=math_test_pct_prof_midpt,
+                                y=read_test_pct_prof_midpt,
+                                size=students_per_teacher)) +
+  geom_point(alpha = 1/3) +
+  labs(x='% of Students Proficient in Math',
+       y='% of Students Proficient in Reading',
+       title='Math vs. Reading Proficiency (by FTE Teachers)',
+       subtitle='Idaho High Schools 2017')
+ggsave(filename="scatter_student_teacher.png",
+         width=6,
+         height=4)
+dev.off()
+```
+
+
+
+```{r regressions}
+# Regressions
+formatted_data_race_sub <- formatted_data_race %>% filter(race != 99)
+formatted_data_sex_sub <- formatted_data_sex %>% filter(sex != 99)
+
+
+### Math Regressions
+sex_diff_model_m <- lm(math_test_pct_prof_midpt ~ as.factor(sex),
+                     data=formatted_data_sex_sub)
+race_diff_model_m <- lm(math_test_pct_prof_midpt ~ as.factor(race),
+                      data=formatted_data_race_sub)
+size_diff_model_m <- lm(math_test_pct_prof_midpt ~ enrollment,
+                     data=data)
+fte_diff_model_m <- lm(math_test_pct_prof_midpt ~ students_per_teacher,
+                     data=data)
+
+
+### Reading Regressions
+sex_diff_model_r <- lm(read_test_pct_prof_midpt ~ as.factor(sex),
+                     data=formatted_data_sex_sub)
+race_diff_model_r <- lm(read_test_pct_prof_midpt ~ as.factor(race),
+                      data=formatted_data_race_sub)
+size_diff_model_r <- lm(math_test_pct_prof_midpt ~ enrollment,
+                     data=data)
+fte_diff_model_r <- lm(math_test_pct_prof_midpt ~ students_per_teacher,
+                     data=data)
+```
+
+
+```{r regressions_summaries}
+### Reporting
+summary(sex_diff_model_m)
+print('##################')
+summary(sex_diff_model_r)
+```
+
+```{r regressions_summaries}
+### Reporting
+summary(race_diff_model_m)
+print('##################')
+summary(race_diff_model_r)
+```
+
+```{r regressions_summaries}
+### Reporting
+summary(size_diff_model_m)
+print('##################')
+summary(size_diff_model_r)
+```
+
+```{r regressions_summaries}
+### Reporting
+summary(fte_diff_model_m)
+print('##################')
+summary(fte_diff_model_r)
+```
+
+
+```{r cluster_profiling}
+# Cluster schools into categories
+## NOTE: Because this is an unsupervised exploratory task, train/test split unnecessary
+
+set.seed(777)
+## Subset features
+feature_subset_data <- formatted_data %>% select(school_name,
+                                                 read_test_pct_prof_midpt,
+                                                 math_test_pct_prof_midpt,
+                                                 enrollment,
+                                                 students_per_teacher)
+
+## Remove rows with NaN (9)
+feature_subset_data <- na.omit(feature_subset_data)
+
+##
+feature_subset_data_no_name <- feature_subset_data %>% select(-school_name)
+
+## Find a decent K value
+elbow_points <- c()
+for (k in 3:9) {
+  k_model <- kmeans(feature_subset_data_no_name, k)
+  elbow_points <- c(elbow_points, k_model$tot.withinss)
+}
+plot(elbow_points, type='b')
+ggsave(filename="elbow.png",
+         width=6,
+         height=4)
+dev.off()
+
+```
+
+
+
+
+```{r cluster}
+set.seed(777)
+## Build a k_model w/ decent K value
+k_model <- kmeans(feature_subset_data_no_name, 5)
+
+feature_subset_data_w_clusters <- feature_subset_data
+feature_subset_data_w_clusters$cluster <- as.factor(k_model$cluster)
+
+### Scatterplot of Math Midpt vs. Reading Midpt w/ Cluster
+ggplot(data=feature_subset_data_w_clusters,
+       aes(x=math_test_pct_prof_midpt,
+           y=read_test_pct_prof_midpt,
+           color=as.factor(cluster))) +
+  geom_point() +
+  labs(x='% of Students Proficient in Math',
+       y='% of Students Proficient in Reading',
+       title='Math vs. Reading Proficiency',
+       subtitle='Idaho High Schools 2017')
+ggsave(filename="scatter_cluster.png",
+         width=6,
+         height=4)
+dev.off()
+
+### Scatterplot of Math Midpt vs. Reading Midpt w/ Cluster & Enroll
+ggplot(data=feature_subset_data_w_clusters,
+       aes(x=math_test_pct_prof_midpt,
+           y=read_test_pct_prof_midpt,
+           color=as.factor(cluster),
+           size=enrollment)) +
+  geom_point(alpha=7/10) +
+  labs(x='% of Students Proficient in Math',
+       y='% of Students Proficient in Reading',
+       title='Math vs. Reading Proficiency',
+       subtitle='Idaho High Schools 2017')
+ggsave(filename="scatter_cluster_enroll.png",
+         width=6,
+         height=4)
+dev.off()
+
+## Rough descriptions of each cluster
+for (i in 1:5) {
+  print('################')
+  print(i)
+  print(summary(feature_subset_data_w_clusters %>% filter(feature_subset_data_w_clusters$cluster==i)))
+}
+
+```
+
+
+
+```{r classify_clusters}
+feature_subset_data_w_clusters_no_name <- feature_subset_data_w_clusters %>% select(-school_name)
+tree_model <- rpart(cluster ~., data=feature_subset_data_w_clusters_no_name)
+rpart.plot(tree_model)
+png(filename="tree_cluster.png")
+dev.off()
+```
+
+```{r recursive_clustering}
+set.seed(777)
+regen_data <- data.frame()
+for (i in (1:5)) {
+  print(i)
+  ### Subset by cluster
+  sub_cluster <- feature_subset_data_w_clusters %>% filter(cluster==i)
+  
+  ### Scale cluster
+  sub_cluster_scaled <- sub_cluster %>%
+    select(-cluster) %>%
+    select(-school_name) %>%
+    sapply(rescale, to=c(0:1))
+
+  k_model <- kmeans(sub_cluster_scaled, 4)
+
+  sub_cluster_w_labels <- sub_cluster
+  sub_cluster_w_labels$sub_cluster <- as.factor(k_model$cluster)
+
+  ### Scatterplot
+  ggplot(data=sub_cluster_w_labels,
+         aes(x=math_test_pct_prof_midpt,
+             y=read_test_pct_prof_midpt,
+             color=as.factor(sub_cluster),
+             size=enrollment)) +
+    geom_point(alpha = 7/10) +
+    labs(x='% of Students Proficient in Math',
+         y='% of Students Proficient in Reading',
+         title='Math vs. Reading Proficiency',
+         subtitle='Idaho High Schools 2017')
+  ggsave(filename=paste(i, "sub_cluster_labeled.png", sep="_"),
+         width=6,
+         height=4)
+  
+  
+  regen_data <- rbind(regen_data, sub_cluster_w_labels)
+
+
+}
+
+for (i in (1:5)) {
+  tree_model <- rpart(cluster ~.,
+                      data=data.frame(sub_cluster_list[i])%>%select(-school_name))
+  rpart.plot(tree_model)
+}
+
+```
+
+```{r inner_cluster_highlight}
+
+critical_schools <- data.frame()
+critical_schools <- rbind(critical_schools, regen_data %>% filter(cluster==1) %>% filter(sub_cluster==1) )
+critical_schools <- rbind(critical_schools, regen_data %>% filter(cluster==2) %>% filter(sub_cluster==4) )
+critical_schools <- rbind(critical_schools, regen_data %>% filter(cluster==3) %>% filter(sub_cluster==3) )
+critical_schools <- rbind(critical_schools, regen_data %>% filter(cluster==4) %>% filter(sub_cluster==4) )
+critical_schools <- rbind(critical_schools, regen_data %>% filter(cluster==5) %>% filter(sub_cluster==1) )
+print(critical_schools)
+
+ggplot(data=critical_schools,
+         aes(x=math_test_pct_prof_midpt,
+             y=read_test_pct_prof_midpt,
+             color=as.factor(cluster),
+             size=enrollment)) +
+    geom_jitter(alpha = 7/10) +
+    labs(x='% of Students Proficient in Math',
+         y='% of Students Proficient in Reading',
+         title='Math vs. Reading Proficiency',
+         subtitle='Idaho High Schools 2017')
+  ggsave(filename="critical.png",
+         width=6,
+         height=4)
+  dev.off()
+  
+write.csv2(critical_schools, file="critical_schools.csv")
+```
